@@ -13,7 +13,7 @@ class StartScreen extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const Text(
-              '🐤 DashFall',
+              'DashFall',
               style: TextStyle(
                 fontSize: 48,
                 fontWeight: FontWeight.bold,

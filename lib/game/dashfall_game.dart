@@ -1,13 +1,25 @@
 import 'package:flutter/material.dart';
-import 'character.dart';
-import 'platform.dart';
-import 'spike.dart';
-import '../widgets/game_over_screen.dart';
+import 'character.dart'; // Assuming this defines Character().radius & draw()
+import 'platform.dart';  // Assuming this defines Platform, PlatformType, toRect(), color etc.
+import 'spike.dart';     // Assuming this defines Spike, toOffset(), getPixelRadius(), update()
+import '../widgets/game_over_screen.dart'; // Make sure this path is correct
 import 'dart:async';
 import 'dart:math';
 import 'package:sensors_plus/sensors_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // Import shared_preferences
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
+
+// --- ADJUSTED PHYSICS CONSTANTS ---
+const double GRAVITY_PER_SECOND = 28.0;
+const double INITIAL_JUMP_VELOCITY = -12.0;
+const double JUMP_VELOCITY_SOLID = -16.5;
+const double JUMP_VELOCITY_DASHED = -30.0;
+const double BIRD_Y_VELOCITY_TO_SCREEN_SCALER = 0.18;
+const double MAX_DOWNWARD_VELOCITY = 18.0;
+const double MAX_UPWARD_VELOCITY = -22.0;
+const double HORIZONTAL_SMOOTHNESS = 0.08;
+const double SCROLL_SCORE_MULTIPLIER = 0.08;
 
 class DashFallGame extends StatefulWidget {
   const DashFallGame({super.key});
@@ -18,99 +30,94 @@ class DashFallGame extends StatefulWidget {
 
 class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderStateMixin {
   late AnimationController _controller;
-  late StreamSubscription _accelerometerSubscription;
+  StreamSubscription? _accelerometerSubscription;
   double birdX = 0.0;
-  double birdY = 0.2;
+  double birdY = 0.0;
   double velocityY = 0.0;
-  double gravity = 0.30;
-
   double _targetBirdX = 0.0;
-  double horizontalSmoothness = 0.1;
 
   List<Platform> platforms = [];
   List<Spike> spikes = [];
   final Random _random = Random();
   int score = 0;
-  int _highScore = 0; // Changed to _highScore to indicate it's internal state
+  int _highScore = 0;
   bool isGameOver = false;
   double lastSpikeY = -1.0;
 
-  late Size _currentScreenSize;
+  Size? _currentScreenSize;
 
   static const String _highScoreKey = 'dashFallHighScore';
 
   int _currentSpikeScoreBracket = 0;
   bool _spikeGeneratedForCurrentBracket = false;
-  final String _interstitialAdUnitId = 'ca-app-pub-4689824267498752/9947587251';
+
+  final String _interstitialAdUnitId = 'ca-app-pub-4689824267498752/1424700606';
   InterstitialAd? _interstitialAd;
 
-  void _loadInterstitialAd() { // <--- ADD THIS METHOD
+  int _gameLoopCallCount = 0;
+  bool _initialResetDone = false;
+
+  // Counters for platform generation
+  int _solidGeneratedCount = 0;
+  int _dashedGeneratedCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    MobileAds.instance.initialize();
+
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 16),
+      vsync: this,
+    )..addListener(_gameLoop)
+      ..repeat();
+
+    _loadHighScore().then((_) {
+      // _resetGame called in first build
+    });
+
+    _accelerometerSubscription = accelerometerEvents.listen((event) {
+      if (!isGameOver && mounted) {
+        double tilt = event.x.clamp(-6.0, 6.0) / 6.0;
+        _targetBirdX = -tilt * 1.2;
+        _targetBirdX = _targetBirdX.clamp(-1.0, 1.0);
+      }
+    });
+    _loadInterstitialAd();
+  }
+
+  void _loadInterstitialAd() {
     InterstitialAd.load(
       adUnitId: _interstitialAdUnitId,
       request: const AdRequest(),
       adLoadCallback: InterstitialAdLoadCallback(
         onAdLoaded: (InterstitialAd ad) {
-          // Keep a reference to the ad so you can show it later.
           _interstitialAd = ad;
-          print('InterstitialAd loaded.');
-
-          // Set ad dismissal callback
           _interstitialAd!.fullScreenContentCallback = FullScreenContentCallback(
             onAdDismissedFullScreenContent: (InterstitialAd ad) {
-              print('$ad onAdDismissedFullScreenContent.');
-              ad.dispose(); // Dispose the ad after it's shown
-              _loadInterstitialAd(); // Load the next ad
+              ad.dispose();
+              _loadInterstitialAd();
             },
             onAdFailedToShowFullScreenContent: (InterstitialAd ad, AdError error) {
-              print('$ad onAdFailedToShowFullScreenContent: $error');
-              ad.dispose(); // Dispose the ad
-              _loadInterstitialAd(); // Attempt to load the next ad
+              ad.dispose();
+              _loadInterstitialAd();
             },
           );
         },
         onAdFailedToLoad: (LoadAdError error) {
-          print('InterstitialAd failed to load: $error');
-          _interstitialAd = null; // Ensure ad instance is null if load fails
+          _interstitialAd = null;
         },
       ),
     );
   }
 
-
-
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 1),
-    )..addListener(_gameLoop)
-      ..repeat();
-
-    _loadHighScore().then((_) { // Load high score then reset game
-      _resetGame(); // Initial game state reset, now aware of loaded highScore
-    });
-
-
-    _accelerometerSubscription = accelerometerEvents.listen((event) {
-      if (!isGameOver) {
-        _targetBirdX += -event.x * 0.1;
-        if (_targetBirdX > 1.0) _targetBirdX = -1.0;
-        else if (_targetBirdX < -1.0) _targetBirdX = 1.0;
-      }
-    });
-
-    _loadInterstitialAd();
-
-    // velocityY = -18.0; // Moved initial jump to _resetGame after high score is loaded
-  }
-
   Future<void> _loadHighScore() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() { // Ensure UI updates if highScore is displayed somewhere in this widget tree
-      _highScore = prefs.getInt(_highScoreKey) ?? 0;
-    });
+    if (mounted) {
+      setState(() {
+        _highScore = prefs.getInt(_highScoreKey) ?? 0;
+      });
+    }
   }
 
   Future<void> _saveHighScore(int currentScore) async {
@@ -118,132 +125,121 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
     await prefs.setInt(_highScoreKey, currentScore);
   }
 
-
   @override
   void dispose() {
+    _controller.removeListener(_gameLoop);
     _controller.dispose();
-    _accelerometerSubscription.cancel();
+    _accelerometerSubscription?.cancel();
     _interstitialAd?.dispose();
     super.dispose();
   }
 
   void _resetGame() {
-    // Note: _highScore is NOT reset here. It persists across games.
+    if (!mounted) return;
+    print("GAME: _resetGame() called.");
     setState(() {
       birdX = 0.0;
       _targetBirdX = 0.0;
-      birdY = 0.2;
-      velocityY = 0.0; // Reset velocity
+      birdY = 0.0;
+      velocityY = INITIAL_JUMP_VELOCITY;
       score = 0;
       isGameOver = false;
       platforms.clear();
       spikes.clear();
+
       platforms.addAll([
-        Platform(x: 0.0, y: 0.3, width: 0.4, height: 0.02, type: PlatformType.solid),
-        Platform(x: -0.5, y: -0.1, width: 0.3, height: 0.02, type: PlatformType.dashed),
-        Platform(x: 0.6, y: -0.5, width: 0.4, height: 0.02, type: PlatformType.solid),
+        Platform(x: 0.0, y: 0.5, width: 0.4, height: 0.02, type: PlatformType.solid),
+        Platform(x: -0.5, y: 0.2, width: 0.3, height: 0.02, type: PlatformType.dashed),
+        Platform(x: 0.6, y: -0.1, width: 0.4, height: 0.02, type: PlatformType.solid),
       ]);
-      for (var p in platforms) {
-        p.isUsed = false;
-      }
+      for (var p in platforms) { p.isUsed = false; }
       lastSpikeY = -1.0;
       _currentSpikeScoreBracket = 0;
       _spikeGeneratedForCurrentBracket = false;
-      velocityY = -18.0; // Apply initial jump for new game
+      _gameLoopCallCount = 0;
+
+      // Reset counters
+      _solidGeneratedCount = 0;
+      _dashedGeneratedCount = 0;
     });
   }
 
-  void _handleGameOver() async { // Make it async
-    if (!isGameOver) {
-      setState(() { // Set isGameOver immediately to stop game loop updates
-        isGameOver = true;
-      });
+  void _handleGameOver() async {
+    if (isGameOver) return;
+    if (mounted) setState(() { isGameOver = true; }); else isGameOver = true;
+    print("GAME: _handleGameOver() triggered. Score: $score");
 
-      if (_interstitialAd != null) {
-        _interstitialAd!.show();
-        _interstitialAd = null; // Mark as shown, new ad will be loaded by callback
-      }
-
-      bool isNewRecord = false;
-      int finalHighScoreToDisplay = _highScore; // Start with the current loaded high score
-
-      if (score > _highScore) {
-        isNewRecord = true;
-        _highScore = score; // Update in-memory high score
-        finalHighScoreToDisplay = _highScore; // The new score is the high score
-        await _saveHighScore(_highScore); // Save the new high score
-      }
-      // If score is not > _highScore, finalHighScoreToDisplay remains the old _highScore
-
-      // Ensure this runs after the current frame is built
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) { // Check if the widget is still in the tree
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(
-              builder: (context) => GameOverScreen(
-                score: score, // The current game's score
-                highScore: finalHighScoreToDisplay, // The true high score
-                isNewRecord: isNewRecord, // True only if current score > previous high score
-                onRestart: () {
-                  // When restarting, simply navigate to a new game instance.
-                  // The new instance will load the potentially updated high score.
-                  Navigator.of(context).pushReplacement(
-                    MaterialPageRoute(builder: (context) => const DashFallGame()),
-                  );
-                },
-              ),
-            ),
-          );
-        }
-      });
+    if (_interstitialAd != null) {
+      await _interstitialAd!.show();
+    } else {
+      _loadInterstitialAd();
     }
+
+    bool isNewRecord = false;
+    if (score > _highScore) {
+      isNewRecord = true;
+      _highScore = score;
+      await _saveHighScore(_highScore);
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (context) => GameOverScreen(
+              score: score, highScore: _highScore, isNewRecord: isNewRecord,
+              onRestart: () {
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (context) => const DashFallGame()),
+                );
+              },
+            ),
+          ),
+        );
+      }
+    });
   }
 
   void _gameLoop() {
-    if (!mounted || isGameOver || _currentScreenSize == null) return;
+    if (!mounted || _currentScreenSize == null) return;
+    if (isGameOver) return;
 
-    // ... (rest of your _gameLoop remains IDENTICAL)
+    final double dt = _controller.duration!.inMicroseconds / 1000000.0;
+    _gameLoopCallCount++;
+
     setState(() {
-      // --- Horizontal Smoothing ---
-      birdX = birdX + ( _targetBirdX - birdX ) * horizontalSmoothness;
+      // Horizontal Movement
+      final double effectiveHorizontalSmoothness = 1.0 - pow(1.0 - HORIZONTAL_SMOOTHNESS, dt * 60.0);
+      birdX += (_targetBirdX - birdX) * effectiveHorizontalSmoothness;
+      final birdRadiusNormX = Character().radius / (_currentScreenSize!.width / 2);
+      if (birdX > 1.0 + birdRadiusNormX) birdX = -1.0 - birdRadiusNormX;
+      if (birdX < -1.0 - birdRadiusNormX) birdX = 1.0 + birdRadiusNormX;
 
-      // Pixel-perfect screen wrapping based on bird's pixel position and radius
-      final birdRadius = Character().radius;
-      final screenWidth = _currentScreenSize.width;
-      final birdPxX = screenWidth / 2 + birdX * screenWidth / 2;
-      // If the bird's right edge is left of the screen, wrap to just off the right edge
-      if (birdPxX + birdRadius < 0) {
-        birdX = (screenWidth + birdRadius) / (screenWidth / 2) - 1;
-        _targetBirdX = birdX;
-      }
-      // If the bird's left edge is right of the screen, wrap to just off the left edge
-      else if (birdPxX - birdRadius > screenWidth) {
-        birdX = -(screenWidth + birdRadius) / (screenWidth / 2) + 1;
-        _targetBirdX = birdX;
-      }
+      // Vertical Movement
+      velocityY += GRAVITY_PER_SECOND * dt;
+      velocityY = velocityY.clamp(MAX_UPWARD_VELOCITY, MAX_DOWNWARD_VELOCITY);
+      birdY += velocityY * BIRD_Y_VELOCITY_TO_SCREEN_SCALER * dt;
 
-      // --- Vertical Movement (Gravity & Velocity) ---
-      velocityY += gravity;
-      velocityY = velocityY.clamp(-15.0, 8.0); // Clamp speed
-      birdY += velocityY / 300.0; // Fine-tuned vertical speed
+      // Platform Collision
+      final birdPxY = _currentScreenSize!.height / 2 + birdY * _currentScreenSize!.height / 2;
+      final birdPxX = _currentScreenSize!.width / 2 + birdX * _currentScreenSize!.width / 2;
+      final characterPixelRadius = Character().radius;
 
-      // --- Platform Collision ---
-      final birdPxY = _currentScreenSize.height / 2 + birdY * _currentScreenSize.height / 2;
-
-      for (final platform in platforms) {
+      for (final platform in List<Platform>.from(platforms)) {
         if (platform.isUsed && platform.isDashed()) continue;
-
-        final rect = platform.toRect(_currentScreenSize); // Use actual screen size
-
+        final rect = platform.toRect(_currentScreenSize!);
         final isFalling = velocityY > 0;
-        final birdBottom = birdPxY + Character().radius; // Use Character().radius directly
-        final platformTop = rect.top;
-        // Collision tolerance
-        final isAbovePlatform = birdBottom >= platformTop - 10 && birdBottom <= platformTop + 15;
-        final isWithinPlatformX = birdPxX >= rect.left && birdPxX <= rect.right;
-
-        if (isFalling && isAbovePlatform && isWithinPlatformX) {
-          velocityY = platform.isDashed() ? -45.0 : -15.0; // Jump forces
+        final birdBottomPx = birdPxY + characterPixelRadius;
+        final platformTopPx = rect.top;
+        final double landingTolerance = 12.0;
+        bool yCollision = isFalling &&
+            birdBottomPx >= platformTopPx - landingTolerance &&
+            birdBottomPx <= platformTopPx + rect.height * 0.75;
+        bool xCollision = (birdPxX + characterPixelRadius * 0.8) > rect.left &&
+            (birdPxX - characterPixelRadius * 0.8) < rect.right;
+        if (yCollision && xCollision) {
+          birdY = (platformTopPx - characterPixelRadius - _currentScreenSize!.height / 2) / (_currentScreenSize!.height / 2);
+          velocityY = platform.isDashed() ? JUMP_VELOCITY_DASHED : JUMP_VELOCITY_SOLID;
           if (platform.isDashed()) {
             platform.isUsed = true;
           }
@@ -252,115 +248,130 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
       }
       platforms.removeWhere((p) => p.isDashed() && p.isUsed);
 
-      // --- Scrolling and Dynamic Platform/Spike Generation ---
-      if (birdY < -0.2) {
-        double scrollDelta = -birdY - 0.2;
-        birdY = -0.2;
-        score += (scrollDelta * 100).toInt();
-
-        for (var platform in platforms) {
-          platform.y += scrollDelta;
-        }
-        for (var spike in spikes) {
-          spike.y += scrollDelta;
-        }
+      // Scrolling Logic
+      double scrollThreshold = -0.4;
+      if (birdY < scrollThreshold) {
+        double scrollDelta = scrollThreshold - birdY;
+        birdY = scrollThreshold;
+        score += (scrollDelta * _currentScreenSize!.height * SCROLL_SCORE_MULTIPLIER).toInt();
+        for (var platform in platforms) { platform.y += scrollDelta; }
+        for (var spike in spikes) { spike.y += scrollDelta; }
+        lastSpikeY += scrollDelta;
       }
 
-      platforms.removeWhere((p) => p.y > 1.2);
-      spikes.removeWhere((s) => s.y > 1.2);
+      // Remove Off-Screen Elements
+      final double bottomBoundary = 1.2;
+      final double topBoundaryForGeneration = -0.8;
+      platforms.removeWhere((p) => p.y > bottomBoundary + (p.height / 2));
+      spikes.removeWhere((s) => s.y > bottomBoundary + (s.getPixelRadius(_currentScreenSize!)/(_currentScreenSize!.height/2)));
 
-      if (platforms.isEmpty || platforms.last.y > -0.8) {
-        double x = _random.nextDouble() * 2 - 1;
-        double lastPlatformY = platforms.isEmpty ? -0.5 : platforms.last.y;
-        double y = lastPlatformY - (_random.nextDouble() * 0.4 + 0.3);
-        if (y > -0.8) y = -0.8;
-        double width = 0.2 + _random.nextDouble() * 0.15;
+      // --- Generate New Platforms and Spikes ---
+      if (platforms.isEmpty || platforms.last.y > topBoundaryForGeneration) {
+        double newPlatformX = _random.nextDouble() * 1.8 - 0.9;
+        double lastKnownPlatformY = platforms.isEmpty ? (birdY < 0 ? birdY -0.3 : 0.0) : platforms.last.y;
+        double newPlatformY = lastKnownPlatformY - (_random.nextDouble() * 0.35 + 0.45);
+        newPlatformY = newPlatformY.clamp(-1.0, topBoundaryForGeneration + 0.1);
+        double newPlatformWidth = 0.18 + _random.nextDouble() * 0.15;
+
         PlatformType type;
-        if (_random.nextDouble() < 0.7) { // 0.7 means 70% chance
+        double randomVal = _random.nextDouble();
+        // ===>>> ADJUST THIS VALUE (e.g. 0.5 for 50% solid, 0.4 for 40% solid, etc.)
+        if (randomVal < 0.5) { // CHANCE FOR SOLID (GREEN) PLATFORM
           type = PlatformType.solid;
-        } else {
-          type = PlatformType.dashed; // The remaining 30% chance
+          _solidGeneratedCount++;
+        } else { // REMAINDER CHANCE FOR DASHED PLATFORM
+          type = PlatformType.dashed;
+          _dashedGeneratedCount++;
         }
-        platforms.add(
-          Platform(x: x, y: y, width: width, height: 0.02, type: type),
-        );
+        platforms.add(Platform(x: newPlatformX, y: newPlatformY, width: newPlatformWidth, height: 0.02, type: type));
 
-        if (score >= _currentSpikeScoreBracket + 5000) {
-          _currentSpikeScoreBracket += 5000; // Move to the next bracket
-          _spikeGeneratedForCurrentBracket = false; // Allow a new spike for this new bracket
+        // Periodically print stats
+        if ((_solidGeneratedCount + _dashedGeneratedCount) > 0 && (_solidGeneratedCount + _dashedGeneratedCount) % 20 == 0) {
+          double totalGenerated = (_solidGeneratedCount + _dashedGeneratedCount).toDouble();
+          if (totalGenerated > 0) {
+            print("PLATFORM STATS: Solid: $_solidGeneratedCount (${(_solidGeneratedCount / totalGenerated * 100).toStringAsFixed(1)}%), Dashed: $_dashedGeneratedCount (${(_dashedGeneratedCount / totalGenerated * 100).toStringAsFixed(1)}%)");
+          }
         }
 
-        // 2. If a spike hasn't been generated for the current bracket yet,
-        //    AND we meet a spacing condition, then try to generate one with a random chance.
-        double minSpikeSpacing = 0.4; // You can adjust this minimum vertical spacing if needed
-
-        // Adjust chanceToSpawnThisTick:
-        // Higher (e.g., 0.3 to 0.5) = spike appears sooner once eligible in the bracket.
-        // Lower (e.g., 0.05 to 0.2) = spike may appear later in the bracket.
-        double chanceToSpawnThisTick = 0.15; // Example: 15% chance per eligible game tick
-
+        // Spike Generation Logic (unchanged)
+        if (score >= _currentSpikeScoreBracket + 300) {
+          _currentSpikeScoreBracket += 300;
+          _spikeGeneratedForCurrentBracket = false;
+        }
+        double minSpikeSpacing = 0.6;
+        double chanceToSpawnSpike = 0.18;
         if (!_spikeGeneratedForCurrentBracket &&
-            (lastSpikeY - y > minSpikeSpacing) &&
-            _random.nextDouble() < chanceToSpawnThisTick) {
-
-          double spikeX = _random.nextDouble() * 2 - 1; // Random horizontal position
-          spikes.add(Spike(x: spikeX, y: y + 0.15));     // Add the new spike
-          lastSpikeY = y;                               // Remember y-pos for spacing next one
-          _spikeGeneratedForCurrentBracket = true;      // Mark spike as generated for this bracket
+            (lastSpikeY == -1.0 || (newPlatformY - lastSpikeY).abs() > minSpikeSpacing ) &&
+            _random.nextDouble() < chanceToSpawnSpike && score > 80) {
+          double spikeX = _random.nextDouble() * 1.8 - 0.9;
+          spikes.add(Spike(x: spikeX, y: newPlatformY - 0.12 - _random.nextDouble() * 0.1));
+          lastSpikeY = newPlatformY - 0.12;
+          _spikeGeneratedForCurrentBracket = true;
         }
       }
 
-      // --- Spikes Horizontal Movement ---
+      // Spikes Update
       for (final spike in spikes) {
         spike.update();
       }
 
-      // --- Game Over Conditions ---
-      if (birdY > 1.2) {
+      // Game Over Conditions
+      final birdBottomNorm = birdY + (characterPixelRadius / (_currentScreenSize!.height / 2));
+      if (birdBottomNorm > 1.15) {
         _handleGameOver();
+        return;
       }
-      for (final spike in spikes) {
-        final spikeCenter = spike.toOffset(_currentScreenSize);
-        final spikeRadius = spike.getPixelRadius(_currentScreenSize);
-        final dx = birdPxX - spikeCenter.dx;
-        final dy = birdPxY - spikeCenter.dy;
+      for (final spike in List<Spike>.from(spikes)) {
+        final spikeCenterPx = spike.toOffset(_currentScreenSize!);
+        final spikePixelRadius = spike.getPixelRadius(_currentScreenSize!);
+        final dx = birdPxX - spikeCenterPx.dx;
+        final dy = birdPxY - spikeCenterPx.dy;
         final distance = sqrt(dx * dx + dy * dy);
-        if (distance < Character().radius + spikeRadius) { // Use Character().radius directly
+        if (distance < characterPixelRadius * 0.85 + spikePixelRadius * 0.85) {
           _handleGameOver();
-          break;
+          return;
         }
       }
     });
   }
 
-
   @override
   Widget build(BuildContext context) {
-    // It's good practice to get screen size here if it can change (e.g. orientation)
-    // and if game elements positions depend on it directly in paint.
-    // However, if your game loop uses it for logic that assumes a fixed size per game session,
-    // getting it once might be okay. Your current check in _gameLoop for null is a safeguard.
-    _currentScreenSize = MediaQuery.of(context).size;
+    final newScreenSize = MediaQuery.of(context).size;
+    if (_currentScreenSize == null || _currentScreenSize != newScreenSize) {
+      _currentScreenSize = newScreenSize;
+      if (!_initialResetDone && _currentScreenSize != null) {
+        print("BUILD: Screen size available: ${_currentScreenSize?.width}x${_currentScreenSize?.height}. Resetting game.");
+        _resetGame();
+        _initialResetDone = true;
+      } else if (_initialResetDone && _currentScreenSize != null) {
+        print("BUILD: Screen size changed. Consider if elements need recalc.");
+      }
+    }
+
+    if (_currentScreenSize == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
 
     return Scaffold(
-      backgroundColor: Colors.white, // Or whatever background you prefer
+      backgroundColor: Colors.lightBlue.shade100,
       body: Stack(
         children: [
           CustomPaint(
-            painter: _GamePainter(birdX: birdX, birdY: birdY, platforms: platforms, spikes: spikes),
-            child: Container(), // Ensures CustomPaint takes up space
+            painter: _GamePainter(
+                birdX: birdX, birdY: birdY,
+                platforms: platforms, spikes: spikes),
+            child: Container(width: _currentScreenSize!.width, height: _currentScreenSize!.height),
           ),
           Positioned(
-            top: 50,
-            left: 0,
-            right: 0,
+            top: MediaQuery.of(context).padding.top + 20,
+            left: 0, right: 0,
             child: Text(
               'Score: $score',
               textAlign: TextAlign.center,
               style: const TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                color: Colors.black, // Ensure visibility against your game background
+                  fontSize: 30, fontWeight: FontWeight.bold, color: Colors.black87,
+                  shadows: [Shadow(blurRadius: 1.5, color: Colors.white, offset: Offset(1,1))]
               ),
             ),
           ),
@@ -370,61 +381,81 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
   }
 }
 
-// _GamePainter remains IDENTICAL
 class _GamePainter extends CustomPainter {
   final double birdX;
   final double birdY;
   final List<Platform> platforms;
   final List<Spike> spikes;
-  _GamePainter({required this.birdX, required this.birdY, required this.platforms, required this.spikes});
+
+  _GamePainter({
+    required this.birdX, required this.birdY,
+    required this.platforms, required this.spikes,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Draw background
-    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+    final bgRect = Rect.fromLTWH(0, 0, size.width, size.height);
     final gradient = LinearGradient(
-      begin: Alignment.topCenter,
-      end: Alignment.bottomCenter,
-      colors: [Colors.blue.shade200, Colors.lightBlue.shade50],
+        begin: Alignment.topCenter, end: Alignment.bottomCenter,
+        colors: [Colors.lightBlue.shade300, Colors.lightBlue.shade50],
+        stops: const [0.0, 0.7]
     );
-    final paint = Paint()..shader = gradient.createShader(rect);
-    canvas.drawRect(rect, paint);
+    canvas.drawRect(bgRect, Paint()..shader = gradient.createShader(bgRect));
 
-    // Draw platforms
     for (final platform in platforms) {
-      final paint = Paint()..color = platform.color;
-      final rect = platform.toRect(size);
+      final platformRect = platform.toRect(size);
+      final platformPaint = Paint()..color = platform.color;
       if (platform.type == PlatformType.dashed) {
-        const dashWidth = 6.0;
-        const dashSpace = 4.0;
-        double startX = rect.left;
-        while (startX < rect.right) {
-          final endX = (startX + dashWidth).clamp(rect.left, rect.right);
+        const double dashWidth = 10.0;
+        const double dashSpace = 6.0;
+        double startX = platformRect.left;
+        final platformStrokePaint = Paint()
+          ..color = platform.color.withOpacity(0.85)
+          ..strokeWidth = platformRect.height
+          ..style = PaintingStyle.stroke;
+        while (startX < platformRect.right) {
+          final endX = (startX + dashWidth).clamp(platformRect.left, platformRect.right);
           canvas.drawLine(
-            Offset(startX, rect.center.dy),
-            Offset(endX, rect.center.dy),
-            paint..strokeWidth = rect.height,
+            Offset(startX, platformRect.center.dy),
+            Offset(endX, platformRect.center.dy),
+            platformStrokePaint,
           );
           startX += dashWidth + dashSpace;
         }
       } else {
-        canvas.drawRect(rect, paint);
+        RRect platformRRect = RRect.fromRectAndRadius(platformRect, const Radius.circular(4));
+        canvas.drawRRect(platformRRect, platformPaint);
       }
     }
 
-    // Draw spikes
+    final spikePaint = Paint()..color = Colors.red.shade700;
     for (final spike in spikes) {
-      final paint = Paint()..color = Colors.redAccent;
       final center = spike.toOffset(size);
       final radius = spike.getPixelRadius(size);
-      canvas.drawCircle(center, radius, paint);
+      var path = Path();
+      path.moveTo(center.dx, center.dy - radius);
+      path.lineTo(center.dx - radius * 0.8, center.dy + radius * 0.6);
+      path.lineTo(center.dx + radius * 0.8, center.dy + radius * 0.6);
+      path.close();
+      canvas.drawPath(path, spikePaint);
     }
-
-    // Draw bird
-    final character = Character(); // Assuming Character() is cheap to create
-    character.draw(canvas, size, birdX, birdY);
+    Character().draw(canvas, size, birdX, birdY);
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  bool shouldRepaint(covariant _GamePainter oldDelegate) {
+    if (birdX != oldDelegate.birdX ||
+        birdY != oldDelegate.birdY ||
+        platforms.length != oldDelegate.platforms.length ||
+        spikes.length != oldDelegate.spikes.length) {
+      return true;
+    }
+    return false;
+  }
 }
+
+/*
+// Helper classes (Character, Platform, Spike) would remain the same.
+// Ensure they are correctly defined in their respective files (character.dart, platform.dart, spike.dart)
+// and that PlatformType enum is defined (likely in platform.dart).
+*/
