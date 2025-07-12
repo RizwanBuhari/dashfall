@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../game/dashfall_game.dart';
+import 'package:dashfallgame/widgets/leaderboard_screen.dart'; // Replace 'your_project_name' with your actual project name
 
 class StartScreen extends StatelessWidget {
   const StartScreen({super.key});
@@ -42,6 +43,30 @@ class StartScreen extends StatelessWidget {
                 padding: EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
                 child: Text(
                   'Start Game',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20), // Adds some space between buttons
+
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).push( // Use push, not pushReplacement
+                  MaterialPageRoute(builder: (context) => const LeaderboardScreen()),
+                );
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.white, // Style to match your other button
+                foregroundColor: const Color(0xFF007AFF),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                elevation: 5,
+              ),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 24.0, vertical: 12.0),
+                child: Text(
+                  'Leaderboard',
                   style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                 ),
               ),

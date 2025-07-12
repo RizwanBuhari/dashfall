@@ -1,4 +1,4 @@
-package com.example.dashfallgame
+package com.game.dashfall
 
 import io.flutter.embedding.android.FlutterActivity
 

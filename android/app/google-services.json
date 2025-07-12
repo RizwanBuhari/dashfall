@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "854038169898",
+    "project_id": "dashfall-88b7d",
+    "storage_bucket": "dashfall-88b7d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:854038169898:android:992753d2021dbb01497653",
+        "android_client_info": {
+          "package_name": "com.game.dashfall"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCU6fT2EBXWJz-wqODgwyYD0_YDw_fyE2Q"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -9,15 +9,16 @@ import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:audioplayers/audioplayers.dart';
 
-// --- ADJUSTED PHYSICS CONSTANTS ---
+
 const double GRAVITY_PER_SECOND = 28.0;
 const double INITIAL_JUMP_VELOCITY = -12.0;
 const double JUMP_VELOCITY_SOLID = -16.5;
-const double JUMP_VELOCITY_DASHED = -30.0;
+const double JUMP_VELOCITY_DASHED = -38.0;
 const double BIRD_Y_VELOCITY_TO_SCREEN_SCALER = 0.18;
-const double MAX_DOWNWARD_VELOCITY = 18.0;
-const double MAX_UPWARD_VELOCITY = -22.0;
+const double MAX_DOWNWARD_VELOCITY = 15.0;
+const double MAX_UPWARD_VELOCITY = -20.0;
 const double HORIZONTAL_SMOOTHNESS = 0.08;
 const double SCROLL_SCORE_MULTIPLIER = 0.08;
 
@@ -29,6 +30,9 @@ class DashFallGame extends StatefulWidget {
 }
 
 class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderStateMixin {
+  final AudioPlayer _solidBouncePlayer = AudioPlayer();
+  final AudioPlayer _dashedBouncePlayer = AudioPlayer();
+  bool _isDisposed = false;
   late AnimationController _controller;
   StreamSubscription? _accelerometerSubscription;
   double birdX = 0.0;
@@ -51,7 +55,7 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
   int _currentSpikeScoreBracket = 0;
   bool _spikeGeneratedForCurrentBracket = false;
 
-  final String _interstitialAdUnitId = 'ca-app-pub-4689824267498752/1424700606';
+  final String _interstitialAdUnitId = 'ca-app-pub-4689824267498752/1424700606'; // Use test ID during development
   InterstitialAd? _interstitialAd;
 
   int _gameLoopCallCount = 0;
@@ -61,6 +65,14 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
   int _solidGeneratedCount = 0;
   int _dashedGeneratedCount = 0;
 
+  // --- NEW FOR AD FREQUENCY ---
+  int _gameOverCountSinceLastAd = 0;
+  static const String _gameOverCountKey = 'dashFallGameOverCount';
+  final int _adFrequency = 3; // Show ad every 3 game overs
+  // --- END NEW FOR AD FREQUENCY ---
+
+  Duration? _lastElapsed; // <-- added to track elapsed time between frames
+
   @override
   void initState() {
     super.initState();
@@ -69,11 +81,14 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
     _controller = AnimationController(
       duration: const Duration(milliseconds: 16),
       vsync: this,
-    )..addListener(_gameLoop)
+    )
+      ..addListener(_gameLoop)
       ..repeat();
 
     _loadHighScore().then((_) {
-      // _resetGame called in first build
+      if (mounted) {
+        _loadGameOverCount();
+      }
     });
 
     _accelerometerSubscription = accelerometerEvents.listen((event) {
@@ -99,12 +114,14 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
               _loadInterstitialAd();
             },
             onAdFailedToShowFullScreenContent: (InterstitialAd ad, AdError error) {
+              print('Ad failed to show: $error');
               ad.dispose();
               _loadInterstitialAd();
             },
           );
         },
         onAdFailedToLoad: (LoadAdError error) {
+          print('InterstitialAd failed to load: $error');
           _interstitialAd = null;
         },
       ),
@@ -125,12 +142,33 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
     await prefs.setInt(_highScoreKey, currentScore);
   }
 
+  Future<void> _loadGameOverCount() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _gameOverCountSinceLastAd = prefs.getInt(_gameOverCountKey) ?? 0;
+      });
+    } else {
+      _gameOverCountSinceLastAd = prefs.getInt(_gameOverCountKey) ?? 0;
+    }
+    print("AD FREQ: Loaded game over count: $_gameOverCountSinceLastAd");
+  }
+
+  Future<void> _saveGameOverCount() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_gameOverCountKey, _gameOverCountSinceLastAd);
+    print("AD FREQ: Saved game over count: $_gameOverCountSinceLastAd");
+  }
+
   @override
   void dispose() {
+    _isDisposed = true;
     _controller.removeListener(_gameLoop);
     _controller.dispose();
     _accelerometerSubscription?.cancel();
     _interstitialAd?.dispose();
+    _solidBouncePlayer.dispose();
+    _dashedBouncePlayer.dispose();
     super.dispose();
   }
 
@@ -152,13 +190,14 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
         Platform(x: -0.5, y: 0.2, width: 0.3, height: 0.02, type: PlatformType.dashed),
         Platform(x: 0.6, y: -0.1, width: 0.4, height: 0.02, type: PlatformType.solid),
       ]);
-      for (var p in platforms) { p.isUsed = false; }
+      for (var p in platforms) {
+        p.isUsed = false;
+      }
       lastSpikeY = -1.0;
       _currentSpikeScoreBracket = 0;
       _spikeGeneratedForCurrentBracket = false;
       _gameLoopCallCount = 0;
 
-      // Reset counters
       _solidGeneratedCount = 0;
       _dashedGeneratedCount = 0;
     });
@@ -166,14 +205,30 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
 
   void _handleGameOver() async {
     if (isGameOver) return;
-    if (mounted) setState(() { isGameOver = true; }); else isGameOver = true;
+    if (mounted) setState(() {
+      isGameOver = true;
+    });
+    else
+      isGameOver = true;
+
     print("GAME: _handleGameOver() triggered. Score: $score");
 
-    if (_interstitialAd != null) {
-      await _interstitialAd!.show();
+    _gameOverCountSinceLastAd++;
+    print("AD FREQ: Game over count incremented to $_gameOverCountSinceLastAd");
+
+    if (_gameOverCountSinceLastAd >= _adFrequency) {
+      print("AD FREQ: Ad frequency met. Attempting to show ad.");
+      if (_interstitialAd != null) {
+        await _interstitialAd!.show();
+        _gameOverCountSinceLastAd = 0;
+      } else {
+        print("AD FREQ: Ad not loaded, cannot show. Will try to load next time.");
+        _loadInterstitialAd();
+      }
     } else {
-      _loadInterstitialAd();
+      print("AD FREQ: Ad frequency not met yet ($_gameOverCountSinceLastAd/$_adFrequency).");
     }
+    await _saveGameOverCount();
 
     bool isNewRecord = false;
     if (score > _highScore) {
@@ -187,7 +242,8 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
             builder: (context) => GameOverScreen(
-              score: score, highScore: _highScore, isNewRecord: isNewRecord,
+              score: score,
+              highScore: _highScore,
               onRestart: () {
                 Navigator.of(context).pushReplacement(
                   MaterialPageRoute(builder: (context) => const DashFallGame()),
@@ -204,7 +260,19 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
     if (!mounted || _currentScreenSize == null) return;
     if (isGameOver) return;
 
-    final double dt = _controller.duration!.inMicroseconds / 1000000.0;
+    final elapsed = _controller.lastElapsedDuration;
+    if (elapsed == null) return;
+
+    double dt;
+    if (_lastElapsed == null) {
+      dt = 0;
+    } else {
+      dt = (elapsed - _lastElapsed!).inMicroseconds / 1000000.0;
+    }
+    _lastElapsed = elapsed;
+
+    if (dt == 0) return; // skip first frame to avoid big jump
+
     _gameLoopCallCount++;
 
     setState(() {
@@ -231,20 +299,33 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
         final isFalling = velocityY > 0;
         final birdBottomPx = birdPxY + characterPixelRadius;
         final platformTopPx = rect.top;
-        final double landingTolerance = 12.0;
+        const double landingTolerance = 12.0;
         bool yCollision = isFalling &&
             birdBottomPx >= platformTopPx - landingTolerance &&
             birdBottomPx <= platformTopPx + rect.height * 0.75;
         bool xCollision = (birdPxX + characterPixelRadius * 0.8) > rect.left &&
             (birdPxX - characterPixelRadius * 0.8) < rect.right;
+        // Inside the platform collision loop in _gameLoop()
         if (yCollision && xCollision) {
           birdY = (platformTopPx - characterPixelRadius - _currentScreenSize!.height / 2) / (_currentScreenSize!.height / 2);
-          velocityY = platform.isDashed() ? JUMP_VELOCITY_DASHED : JUMP_VELOCITY_SOLID;
+
+          // --- PLAY SOUND AND SET VELOCITY BASED ON PLATFORM TYPE ---
           if (platform.isDashed()) {
-            platform.isUsed = true;
+            velocityY = JUMP_VELOCITY_DASHED;
+            platform.isUsed = true; // Mark dashed platform as used
+            if (!_isDisposed) { // Check if widget is disposed
+              // Consider using a try-catch if play can throw errors you want to handle gracefully
+              _dashedBouncePlayer.play(AssetSource('sounds/dashed_platform_bounce.mp3'));
+            }
+          } else { // Solid platform
+            velocityY = JUMP_VELOCITY_SOLID;
+            if (!_isDisposed) { // Check if widget is disposed
+              _solidBouncePlayer.play(AssetSource('sounds/solid_platform_bounce.mp3'));
+            }
           }
           break;
         }
+
       }
       platforms.removeWhere((p) => p.isDashed() && p.isUsed);
 
@@ -254,8 +335,12 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
         double scrollDelta = scrollThreshold - birdY;
         birdY = scrollThreshold;
         score += (scrollDelta * _currentScreenSize!.height * SCROLL_SCORE_MULTIPLIER).toInt();
-        for (var platform in platforms) { platform.y += scrollDelta; }
-        for (var spike in spikes) { spike.y += scrollDelta; }
+        for (var platform in platforms) {
+          platform.y += scrollDelta;
+        }
+        for (var spike in spikes) {
+          spike.y += scrollDelta;
+        }
         lastSpikeY += scrollDelta;
       }
 
@@ -263,29 +348,27 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
       final double bottomBoundary = 1.2;
       final double topBoundaryForGeneration = -0.8;
       platforms.removeWhere((p) => p.y > bottomBoundary + (p.height / 2));
-      spikes.removeWhere((s) => s.y > bottomBoundary + (s.getPixelRadius(_currentScreenSize!)/(_currentScreenSize!.height/2)));
+      spikes.removeWhere((s) => s.y > bottomBoundary + (s.getPixelRadius(_currentScreenSize!) / (_currentScreenSize!.height / 2)));
 
       // --- Generate New Platforms and Spikes ---
       if (platforms.isEmpty || platforms.last.y > topBoundaryForGeneration) {
         double newPlatformX = _random.nextDouble() * 1.8 - 0.9;
-        double lastKnownPlatformY = platforms.isEmpty ? (birdY < 0 ? birdY -0.3 : 0.0) : platforms.last.y;
+        double lastKnownPlatformY = platforms.isEmpty ? (birdY < 0 ? birdY - 0.3 : 0.0) : platforms.last.y;
         double newPlatformY = lastKnownPlatformY - (_random.nextDouble() * 0.35 + 0.45);
         newPlatformY = newPlatformY.clamp(-1.0, topBoundaryForGeneration + 0.1);
         double newPlatformWidth = 0.18 + _random.nextDouble() * 0.15;
 
         PlatformType type;
         double randomVal = _random.nextDouble();
-        // ===>>> ADJUST THIS VALUE (e.g. 0.5 for 50% solid, 0.4 for 40% solid, etc.)
-        if (randomVal < 0.5) { // CHANCE FOR SOLID (GREEN) PLATFORM
+        if (randomVal < 0.5) {
           type = PlatformType.solid;
           _solidGeneratedCount++;
-        } else { // REMAINDER CHANCE FOR DASHED PLATFORM
+        } else {
           type = PlatformType.dashed;
           _dashedGeneratedCount++;
         }
         platforms.add(Platform(x: newPlatformX, y: newPlatformY, width: newPlatformWidth, height: 0.02, type: type));
 
-        // Periodically print stats
         if ((_solidGeneratedCount + _dashedGeneratedCount) > 0 && (_solidGeneratedCount + _dashedGeneratedCount) % 20 == 0) {
           double totalGenerated = (_solidGeneratedCount + _dashedGeneratedCount).toDouble();
           if (totalGenerated > 0) {
@@ -293,7 +376,6 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
           }
         }
 
-        // Spike Generation Logic (unchanged)
         if (score >= _currentSpikeScoreBracket + 300) {
           _currentSpikeScoreBracket += 300;
           _spikeGeneratedForCurrentBracket = false;
@@ -301,8 +383,9 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
         double minSpikeSpacing = 0.6;
         double chanceToSpawnSpike = 0.18;
         if (!_spikeGeneratedForCurrentBracket &&
-            (lastSpikeY == -1.0 || (newPlatformY - lastSpikeY).abs() > minSpikeSpacing ) &&
-            _random.nextDouble() < chanceToSpawnSpike && score > 80) {
+            (lastSpikeY == -1.0 || (newPlatformY - lastSpikeY).abs() > minSpikeSpacing) &&
+            _random.nextDouble() < chanceToSpawnSpike &&
+            score > 80) {
           double spikeX = _random.nextDouble() * 1.8 - 0.9;
           spikes.add(Spike(x: spikeX, y: newPlatformY - 0.12 - _random.nextDouble() * 0.1));
           lastSpikeY = newPlatformY - 0.12;
@@ -310,12 +393,10 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
         }
       }
 
-      // Spikes Update
       for (final spike in spikes) {
         spike.update();
       }
 
-      // Game Over Conditions
       final birdBottomNorm = birdY + (characterPixelRadius / (_currentScreenSize!.height / 2));
       if (birdBottomNorm > 1.15) {
         _handleGameOver();
@@ -371,7 +452,7 @@ class _DashFallGameState extends State<DashFallGame> with SingleTickerProviderSt
               textAlign: TextAlign.center,
               style: const TextStyle(
                   fontSize: 30, fontWeight: FontWeight.bold, color: Colors.black87,
-                  shadows: [Shadow(blurRadius: 1.5, color: Colors.white, offset: Offset(1,1))]
+                  shadows: [Shadow(blurRadius: 1.5, color: Colors.white, offset: Offset(1, 1))]
               ),
             ),
           ),
@@ -454,8 +535,3 @@ class _GamePainter extends CustomPainter {
   }
 }
 
-/*
-// Helper classes (Character, Platform, Spike) would remain the same.
-// Ensure they are correctly defined in their respective files (character.dart, platform.dart, spike.dart)
-// and that PlatformType enum is defined (likely in platform.dart).
-*/
