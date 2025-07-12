@@ -1,16 +1,18 @@
-# dashfallgame
+# DashFall
 
-A 2D Arcade Game
+**DashFall** is a fast-paced 2D arcade game built with **Flutter** where you control a falling ball using your phone's tilt. Jump on platforms, dodge spikes, and survive as long as you can!
 
-## Getting Started
+🎮 **Play now on Android**:  
+👉 [Download on Google Play](https://play.google.com/store/apps/details?id=com.game.dashfall)
 
-This project is a starting point for a Flutter application.
+---
 
-A few resources to get you started if this is your first Flutter project:
+## 🎮 Game Features
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+- 🎯 Tilt-based control
+- 🟫 Solid platforms (medium jump)
+- ▫️ Dashed platforms (super high jump)
+- 🔺 Moving spikes (game over on contact)
+- 🔊 Jump sound effects
+- 🧠 Intelligent platform & spike generation
+- 📈 High score tracking
