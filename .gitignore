@@ -44,3 +44,14 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 /android/key.properties
+
+# Keystore files (VERY IMPORTANT - DO NOT COMMIT TO PUBLIC REPOS)
+*.jks
+
+# Google Services JSON (Firebase config - often excluded from public repos)
+# If your repo is private and team needs it, you can comment this out.
+google-services.json
+
+# Example for a specific image you might not want to track
+# If 1.png is an asset you DO want, then DO NOT add this line.
+# 1.png
